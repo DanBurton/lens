@@ -27,6 +27,7 @@ module Control.Lens.TH
   , makePrisms
   , makeWrapped
   , makeFields
+  , declareLenses
   -- * Configuring Lenses
   , makeLensesWith
   , makeFieldsWith
@@ -73,7 +74,7 @@ import Control.Lens.Tuple
 import Control.Lens.Traversal
 import Control.Lens.Wrapped
 import Data.Char (toLower, toUpper, isUpper)
-import Data.Either (lefts)
+import Data.Either (lefts, partitionEithers)
 import Data.Foldable hiding (concat)
 import Data.Function (on)
 import Data.List as List
@@ -290,6 +291,47 @@ makeClassy = makeLensesWith classyRules
 -- @
 makeIso :: Name -> Q [Dec]
 makeIso = makeLensesWith isoRules
+
+-- |
+-- /e.g./
+--
+-- @
+-- class HasCoordinate t where
+--     x :: Lens' t Int
+--     y :: Lens' t Int 
+-- declareLenses [d|data Foo = Foo { ident :: String, x :: Int, y :: Int }|]
+-- @
+-- 
+-- will create
+-- 
+-- @
+-- data Foo = Foo String Int Int
+-- instance HasCoordinate Foo where ...
+-- ident :: Lens' Foo String
+-- @
+declareLenses :: Q [Dec] -> Q [Dec]
+declareLenses mdecs = mdecs >>= \decs -> do
+  (defs, defsI) <- fmap (partitionEithers . concat) $ forM decs $ \r -> case r of
+    DataD cx dataName tyvar [con@(RecC conName rec)] derivings -> do
+      let def = DataD cx dataName tyvar [NormalC conName [(s, t) | (_, s, t) <- rec]] derivings
+      (Left def:) <$> create dataName con
+    _ -> fail "makeLensesWith: Unsupported data type"
+
+  return $ defs
+    ++ [InstanceD [] (ConT cls `AppT` ConT typName) ds
+      | ((cls, typName), ds) <- Map.toAscList $ Map.fromListWith (flip (++)) defsI]
+
+  where
+    create dataName con@(RecC _ recs) = forM recs $ \(fieldName, _, _) -> do
+      mn <- lookupValueName (nameBase fieldName)
+      let cons = [(con, [fieldName])]
+      case mn of
+        Just m -> do
+            ClassOpI actual _ cls _ <- reify m
+            dec <- makeFieldLensBody False actual cons Nothing
+            return $ Right ((cls, dataName), [dec])
+        Nothing -> Left <$> makeFieldLensBody False fieldName cons Nothing
+    create _ _ = fail "makeLensesWith: Unsupported data type"
 
 -- | Derive lenses and traversals, specifying explicit pairings
 -- of @(fieldName, lensName)@.
