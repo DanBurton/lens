@@ -28,6 +28,7 @@ module Control.Lens.TH
   , makeWrapped
   , makeFields
   , declareLenses
+  , declarePrisms
   -- * Configuring Lenses
   , makeLensesWith
   , makeFieldsWith
@@ -311,11 +312,13 @@ makeIso = makeLensesWith isoRules
 -- @
 declareLenses :: Q [Dec] -> Q [Dec]
 declareLenses mdecs = mdecs >>= \decs -> do
-  (defs, defsI) <- fmap (partitionEithers . concat) $ forM decs $ \r -> case r of
-    DataD cx dataName tyvar [con@(RecC conName rec)] derivings -> do
-      let def = DataD cx dataName tyvar [NormalC conName [(s, t) | (_, s, t) <- rec]] derivings
-      (Left def:) <$> create dataName con
-    _ -> fail "makeLensesWith: Unsupported data type"
+  (defs, defsI) <- fmap (partitionEithers . concat . concat) $ forM decs $ \r -> case deNewtype r of
+    DataD cx dataName tyvar cons derivings -> forM cons $ \r' -> case r' of
+      con@(RecC conName rec) -> do
+        let def = DataD cx dataName tyvar [NormalC conName [(s, t) | (_, s, t) <- rec]] derivings
+        (Left def:) <$> create dataName con
+      _ -> return []
+    _ -> fail "declareLenses: Unsupported data type"
 
   return $ defs
     ++ [InstanceD [] (ConT cls `AppT` ConT typName) ds
@@ -331,7 +334,16 @@ declareLenses mdecs = mdecs >>= \decs -> do
             dec <- makeFieldLensBody False actual cons Nothing
             return $ Right ((cls, dataName), [dec])
         Nothing -> Left <$> makeFieldLensBody False fieldName cons Nothing
-    create _ _ = fail "makeLensesWith: Unsupported data type"
+    create _ _ = fail "declareLenses: Unsupported data type"
+
+-- | Generate a 'Prism' for each constructor of a given declaration.
+declarePrisms :: Q [Dec] -> Q [Dec]
+declarePrisms mdecs = do
+  decs <- mdecs
+  fmap concat $ forM decs $ \r -> case deNewtype r of
+    DataD ctx tyConName args cons _ ->
+      (r:) <$> makePrismsForCons ctx tyConName args cons
+    _ -> fail "declarePrisms: Unsupported data type"
 
 -- | Derive lenses and traversals, specifying explicit pairings
 -- of @(fieldName, lensName)@.
